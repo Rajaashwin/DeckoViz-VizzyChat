@@ -8,15 +8,11 @@ services:
       npm install &&
       npm run build &&
       cd ..
-    startCommand: |-
-      pip install -r backend/requirements.txt &&
-      python -m uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    startCommand: bash start.sh
     envVars:
       - key: HUGGINGFACE_API_KEY
         sync: false
       - key: OPENROUTER_API_KEY
         sync: false
       - key: REPLICATE_API_KEY
-        sync: false
-      - key: VITE_API_BASE_URL
         sync: false
