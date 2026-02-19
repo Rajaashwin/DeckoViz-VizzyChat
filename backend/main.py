@@ -16,6 +16,7 @@ from datetime import datetime
 import urllib.parse
 from dotenv import load_dotenv
 import logging
+import time
 from huggingface_hub import InferenceClient
 
 # Try to import replicate, it's optional
@@ -234,6 +235,33 @@ else:
 # In-memory sessions
 sessions = {}
 
+# metric counters for basic telemetry
+metrics = {
+    "chat_count": 0,
+    "image_count": 0,
+    "total_chat_time": 0.0,  # seconds
+}
+
+# path for session persistence
+SESSION_FILE = os.path.join(os.path.dirname(__file__), "sessions.json")
+
+# load persisted sessions if available
+if os.path.exists(SESSION_FILE):
+    try:
+        with open(SESSION_FILE, "r", encoding="utf-8") as f:
+            sessions = json.load(f)
+            logging.info(f"Loaded {len(sessions)} sessions from disk")
+    except Exception as e:
+        logging.warning(f"Failed to load sessions file: {e}")
+
+
+def persist_sessions():
+    try:
+        with open(SESSION_FILE, "w", encoding="utf-8") as f:
+            json.dump(sessions, f)
+    except Exception as e:
+        logging.warning(f"Failed to write sessions file: {e}")
+
 
 class ChatMessage(BaseModel):
     role: str
@@ -260,6 +288,7 @@ class ChatResponse(BaseModel):
     refinement_suggestion: Optional[str] = None
     copy: str
     intent_category: str
+    user_type: Optional[str] = None
     conversation_history: List[ChatMessage]
     llm_model: str = "openrouter/auto"  # Text generation model
     image_model: str = "none"  # Image generation model
@@ -272,7 +301,7 @@ class UserTaste(BaseModel):
     themes: List[str] = []
 
 
-def interpret_intent(user_message: str) -> tuple[str, str]:
+def interpret_intent(user_message: str) -> tuple[str, str, str]:
     """Decode the user's message into an intent and a cleaned prompt.
 
     Returns (intent_category, prompt_text).  The intent category will be one of
@@ -315,8 +344,8 @@ Respond with JSON only.
         parsed = json.loads(text[start:end])
         intent = parsed.get("intent", "creative")
         prompt = parsed.get("prompt", user_message)
-        # user_type = parsed.get("user_type", "home")  # unused for now
-        return intent, prompt
+        user_type = parsed.get("user_type", "home")
+        return intent, prompt, user_type
     except Exception as e:
         logging.error("interpret_intent failed: %s", e)
         return "creative", user_message
@@ -717,11 +746,18 @@ async def root():
             "POST /chat": "Send a message and get generated images + copy",
             "POST /upload": "Upload an image for analysis and suggested transformations",
             "GET /session/{session_id}": "Retrieve session history",
+            "GET /metrics": "Return simple telemetry counters",
         }
     }
 
 
 from fastapi import UploadFile, File
+
+@app.get("/metrics")
+async def get_metrics():
+    """Return basic accumulated metrics."""
+    return metrics
+
 
 @app.post("/upload")
 async def upload_image(file: UploadFile = File(...)):
@@ -752,6 +788,8 @@ async def upload_image(file: UploadFile = File(...)):
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
+    start_time = time.time()
+    metrics["chat_count"] += 1
     # create or resume session
     session_id = request.session_id or str(uuid.uuid4())
     is_new = session_id not in sessions
@@ -760,6 +798,8 @@ async def chat(request: ChatRequest):
             "created_at": datetime.now().isoformat(),
             "messages": [],
             "taste": UserTaste(),
+            # track how many images this session has created (for daily limits)
+            "image_count": 0,
         }
     session = sessions[session_id]
 
@@ -788,7 +828,7 @@ async def chat(request: ChatRequest):
         intent_category = 'chat'
         base_prompt = request.message
     else:
-        intent_category, base_prompt = interpret_intent(request.message)
+        intent_category, base_prompt, detected_user_type = interpret_intent(request.message)
 
     if intent_category == "chat":
         # user is asking a general question - no image generation
@@ -799,24 +839,63 @@ async def chat(request: ChatRequest):
         # descriptions/suggestion remain empty
         descriptions = []
         suggestion = ""
+        user_type = detected_user_type
     else:
+        user_type = detected_user_type
         # Image mode: generate images + copy
         # build a structured prompt with defaults
         final_prompt = construct_prompt(base_prompt, intent_category, request.num_images)
 
-        # Generate images (tries Replicate first, then OpenRouter, then falls back to colored SVGs)
-        images, image_model_used = generate_images(final_prompt, min(request.num_images, 4))
-        
-        copy_text = generate_copy(request.message, intent_category)
-        # describe variations so frontend can show concise labels
-        descriptions = describe_image_variations(final_prompt, len(images))
-        # suggest one quick refinement idea for the user
-        suggestion = generate_refinement_suggestion(final_prompt)
+        # enforce daily image limits based on user type (home vs enterprise)
+        # enterprise users can generate many; home users are capped low
+        if user_type != "enterprise":
+            max_images = 5
+        else:
+            max_images = 100
+
+        # check cumulative count for the session
+        session.setdefault("image_count", 0)
+        if user_type != "enterprise" and session["image_count"] >= max_images:
+            # we've already hit the limit, skip generation and warn the user
+            warning = f"You've reached your daily limit of {max_images} images. Please try again later or upgrade to enterprise."
+            logging.info(f"{warning} (session {session_id})")
+            copy_text = warning
+            images = []
+            descriptions = []
+            suggestion = ""
+        else:
+            if request.num_images > max_images:
+                logging.info(f"Limiting images to {max_images} for {user_type} user")
+                request.num_images = max_images
+
+            # Generate images (tries Replicate first, then OpenRouter, then falls back to colored SVGs)
+            images, image_model_used = generate_images(final_prompt, min(request.num_images, 4))
+            # increment session image count
+            session["image_count"] = session.get("image_count", 0) + len(images)
+            metrics["image_count"] += len(images)
+
+            copy_text = generate_copy(request.message, intent_category)
+            # describe variations so frontend can show concise labels
+            descriptions = describe_image_variations(final_prompt, len(images))
+            # suggest one quick refinement idea for the user
+            suggestion = generate_refinement_suggestion(final_prompt)
 
     # if this was the first response of a session, prepend the startup greeting
     if is_new:
         from prompts import STARTUP_PROMPT
         copy_text = STARTUP_PROMPT + "\n\n" + copy_text
+
+    # record iteration information for debugging and UI
+    gen_record = {
+        "timestamp": datetime.now().isoformat(),
+        "prompt": base_prompt if intent_category != "chat" else request.message,
+        "intent": intent_category,
+        "user_type": user_type,
+        "images": images,
+        "copy": copy_text,
+    }
+    session.setdefault("generations", []).append(gen_record)
+    persist_sessions()
 
     user_msg = ChatMessage(role="user", content=request.message)
     assistant_msg = ChatMessage(role="assistant", content=copy_text, images=images)
@@ -826,7 +905,7 @@ async def chat(request: ChatRequest):
     if intent_category and intent_category not in session["taste"].themes:
         session["taste"].themes.append(intent_category)
 
-    return ChatResponse(
+    response = ChatResponse(
         session_id=session_id,
         message=copy_text,
         images=images,
@@ -834,10 +913,16 @@ async def chat(request: ChatRequest):
         refinement_suggestion=suggestion if not is_new else suggestion,
         copy=copy_text,
         intent_category=intent_category,
+        user_type=user_type,
         conversation_history=[ChatMessage(**m) for m in session["messages"]],
         llm_model="openrouter/auto",
         image_model=image_model_used,
     )
+    # record timing
+    elapsed = time.time() - start_time
+    metrics["total_chat_time"] += elapsed
+    logging.info(f"/chat handled in {elapsed:.2f}s")
+    return response
 
 
 @app.post("/refine", response_model=ChatResponse)
