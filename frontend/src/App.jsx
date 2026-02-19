@@ -5,6 +5,7 @@ import './App.css'
 import ChatMessage from './components/ChatMessage'
 import ImageGallery from './components/ImageGallery'
 import InputBar from './components/InputBar'
+import GenerationHistory from './components/GenerationHistory'
 
   const API_BASE = API_BASE_URL
 
@@ -17,6 +18,7 @@ function App() {
   const [selectedImages, setSelectedImages] = useState([]);
   const [imageDescriptions, setImageDescriptions] = useState([]);
   const [modelInfo, setModelInfo] = useState({ llm: 'openrouter/auto', image: 'none' });
+  const [recentGenerations, setRecentGenerations] = useState([]);
   const messagesEndRef = useRef(null);
 
   // Initialize session on mount
@@ -42,13 +44,16 @@ function App() {
         message: text,
         mode,
       });
-      const { images, image_descriptions, copy, intent_category, llm_model, image_model } = response.data;
+      const { images, image_descriptions, copy, intent_category, llm_model, image_model, recent_generations } = response.data;
       setSelectedImages(images);
       setImageDescriptions(image_descriptions || []);
       setModelInfo({
         llm: llm_model || 'openrouter/auto',
         image: image_model || 'none'
       });
+      if (recent_generations) {
+        setRecentGenerations(recent_generations);
+      }
       const assistantMessage = {
         role: 'assistant',
         content: copy,
@@ -107,6 +112,7 @@ function App() {
   }
 
   const handleRefine = async (refinementText) => {
+    // existing code unchanged below
     if (!refinementText.trim() || messages.length === 0 || !sessionId) return
 
     const lastUserMessage = [...messages]
@@ -125,13 +131,14 @@ function App() {
         // backend will respect intent (typically image mode)
       })
 
-      const { images, image_descriptions, copy, intent_category, llm_model, image_model } = response.data
+      const { images, image_descriptions, copy, intent_category, llm_model, image_model, recent_generations } = response.data
 
       // Update model info
       setModelInfo({
         llm: llm_model || 'openrouter/auto',
         image: image_model || 'none'
       })
+      if (recent_generations) setRecentGenerations(recent_generations)
 
       const refinedMessage = {
         role: 'assistant',
@@ -170,6 +177,7 @@ function App() {
     <div className="app-container">
       <header className="app-header">
         <div className="header-content">
+        {recentGenerations.length > 0 && <GenerationHistory generations={recentGenerations} />}
           <h1>✨ Vizzy Chat</h1>
           <p>AI-powered creative co-pilot for visual, narrative & experiential content</p>
           <div className="model-display">
