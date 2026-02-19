@@ -1,8 +1,8 @@
 import React, { useState } from 'react'
 import './InputBar.css'
 
-export default function InputBar({ onSend, onUpload, disabled }) {
-  const [input, setInput] = useState('')
+export default function InputBar({ onSend, onUpload, disabled, mode, setMode }) {
+  const [input, setInput] = useState('');
 
   const handleSubmit = () => {
     if (input.trim()) {
@@ -22,11 +22,22 @@ export default function InputBar({ onSend, onUpload, disabled }) {
   return (
     <div className="input-bar">
       <div className="input-controls-row">
-  
+        <div className="mode-bubbles">
+          <button
+            className={`mode-btn${mode === 'chat' ? ' active' : ''}`}
+            onClick={() => setMode('chat')}
+            disabled={disabled}
+          >💬 Chat</button>
+          <button
+            className={`mode-btn${mode === 'image' ? ' active' : ''}`}
+            onClick={() => setMode('image')}
+            disabled={disabled}
+          >🎨 Create Image</button>
+        </div>
         <div className="input-container">
           <input
             type="text"
-            placeholder="Describe what you'd like to create (text or image prompt)"
+            placeholder={mode === 'image' ? 'Describe the image you want to create...' : 'Type your message...'}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyPress={handleKeyPress}
@@ -42,22 +53,18 @@ export default function InputBar({ onSend, onUpload, disabled }) {
           >
             {disabled ? '⏳' : '→'}
           </button>
-          {onUpload && (
+          {onUpload && mode === 'image' && (
             <input
               type="file"
               accept="image/*"
               onChange={(e) => onUpload(e.target.files[0])}
               disabled={disabled}
-              title="Upload image for analysis"
               className="upload-input"
+              aria-label="Upload image"
             />
           )}
         </div>
       </div>
-      <p className="input-hint">
-        📝 Enter any creative request or upload an image to analyze. The system will
-        respond with text or generate visuals based on intent.
-      </p>
     </div>
-  )
+  );
 }

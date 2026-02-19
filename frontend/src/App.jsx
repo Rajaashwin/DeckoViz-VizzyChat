@@ -10,13 +10,14 @@ import InputBar from './components/InputBar'
 
 function App() {
   const [sessionId, setSessionId] = useState(null)
-  // no explicit mode; backend determines behaviour via intent
-  const [messages, setMessages] = useState([])
-  const [loading, setLoading] = useState(false)
-  const [selectedImages, setSelectedImages] = useState([])
-  const [imageDescriptions, setImageDescriptions] = useState([])
-  const [modelInfo, setModelInfo] = useState({ llm: 'openrouter/auto', image: 'none' })
-  const messagesEndRef = useRef(null)
+  // Mode state: 'chat' or 'image'
+  const [mode, setMode] = useState('chat');
+  const [messages, setMessages] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [selectedImages, setSelectedImages] = useState([]);
+  const [imageDescriptions, setImageDescriptions] = useState([]);
+  const [modelInfo, setModelInfo] = useState({ llm: 'openrouter/auto', image: 'none' });
+  const messagesEndRef = useRef(null);
 
   // Initialize session on mount
   useEffect(() => {
@@ -30,30 +31,24 @@ function App() {
   }, [messages])
 
   const handleSendMessage = async (text) => {
-    if (!text.trim() || !sessionId) return
-
+    if (!text.trim() || !sessionId) return;
     // Add user message to UI
-    const userMessage = { role: 'user', content: text, images: [] }
-    setMessages(prev => [...prev, userMessage])
-    setLoading(true)
-
+    const userMessage = { role: 'user', content: text, images: [], mode };
+    setMessages(prev => [...prev, userMessage]);
+    setLoading(true);
     try {
       const response = await axios.post(`${API_BASE}/chat`, {
         session_id: sessionId,
         message: text,
-      })
-
-      const { images, image_descriptions, copy, intent_category, llm_model, image_model } = response.data
-
-      // update gallery descriptions if available
-      // Update gallery state and model info display
-      setSelectedImages(images)
-      setImageDescriptions(image_descriptions || [])
+        mode,
+      });
+      const { images, image_descriptions, copy, intent_category, llm_model, image_model } = response.data;
+      setSelectedImages(images);
+      setImageDescriptions(image_descriptions || []);
       setModelInfo({
         llm: llm_model || 'openrouter/auto',
         image: image_model || 'none'
-      })
-
+      });
       const assistantMessage = {
         role: 'assistant',
         content: copy,
@@ -61,18 +56,18 @@ function App() {
         intent: intent_category,
         image_descriptions,
         refinement_suggestion: response.data.refinement_suggestion,
-      }
-      setMessages(prev => [...prev, assistantMessage])
+      };
+      setMessages(prev => [...prev, assistantMessage]);
     } catch (error) {
-      console.error('Error:', error)
+      console.error('Error:', error);
       const errorMessage = {
         role: 'assistant',
         content: `Error: ${error.response?.data?.detail || error.message}. Make sure the backend is running on http://localhost:8000`,
         images: [],
-      }
-      setMessages(prev => [...prev, errorMessage])
+      };
+      setMessages(prev => [...prev, errorMessage]);
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
   }
 
@@ -234,7 +229,8 @@ function App() {
           <div ref={messagesEndRef} />
         </div>
 
-        {selectedImages.length > 0 && (
+        {/* Only show ImageGallery if in image mode and images exist */}
+        {mode === 'image' && selectedImages.length > 0 && (
           <ImageGallery
             images={selectedImages}
             descriptions={imageDescriptions}
@@ -243,7 +239,13 @@ function App() {
           />
         )}
 
-        <InputBar onSend={handleSendMessage} onUpload={handleUpload} disabled={loading} />
+        <InputBar
+          onSend={handleSendMessage}
+          onUpload={handleUpload}
+          disabled={loading}
+          mode={mode}
+          setMode={setMode}
+        />
       </div>
     </div>
   )

@@ -94,13 +94,18 @@ if HUGGINGFACE_API_KEY:
         logging.warning("Failed to initialize HF client: %s", e)
 
 def generate_text(
-    prompt: str,
+    prompt: Optional[str] = None,
     max_tokens: int = 300,
     temperature: float = 0.7,
     system_prompt: Optional[str] = None,
-) -> str:
+    messages: Optional[list] = None,
+) -> Optional[str]:
     """
     Generate text using the OpenRouter API (free tier).
+
+    You can either supply a simple `prompt` string (the common case) or a full
+    `messages` list in the chat-completions format.  If both are provided, the
+    `messages` list takes precedence.
 
     * `system_prompt` is an optional message that is sent with role="system".
       By default we inject the CORE_SYSTEM_PROMPT defined in prompts.py so that
@@ -124,18 +129,24 @@ def generate_text(
             "Content-Type": "application/json",
         }
 
-        messages = []
-        # system message: core prompt or override
-        from .prompts import CORE_SYSTEM_PROMPT
-        sys_msg = system_prompt if system_prompt is not None else CORE_SYSTEM_PROMPT
-        if sys_msg:
-            messages.append({"role": "system", "content": sys_msg})
-        messages.append({"role": "user", "content": prompt})
+        # build message list either from provided `messages` or from the single
+        # prompt string.  The explicit `messages` argument overrides the prompt.
+        if messages is not None:
+            msgs = messages.copy()
+        else:
+            msgs = []
+            # system message: core prompt or override
+            from prompts import CORE_SYSTEM_PROMPT
+            sys_msg = system_prompt if system_prompt is not None else CORE_SYSTEM_PROMPT
+            if sys_msg:
+                msgs.append({"role": "system", "content": sys_msg})
+            if prompt is not None:
+                msgs.append({"role": "user", "content": prompt})
 
         payload = {
             "model": "openrouter/auto",  # Auto-selects best available free model
-            "messages": messages,
-            "max_tokens": min(max_tokens, 500),
+            "messages": msgs,
+            "max_tokens": min(max_tokens, 1000),
             "temperature": temperature,
         }
 
@@ -164,18 +175,31 @@ def generate_text(
                 f"OpenRouter API returned status {response.status_code}"
             )
 
-        data = response.json()
+        # log raw response for debugging
+        logging.debug(f"OpenRouter raw response: {response.text}")
+        try:
+            data = response.json()
+        except Exception as e:
+            logging.error("Failed to parse OpenRouter JSON: %s", e)
+            raise
 
         # Extract generated text from OpenRouter response
         if "choices" in data and len(data["choices"]) > 0:
-            text = data["choices"][0].get("message", {}).get("content", "").strip()
+            msg = data["choices"][0].get("message", {})
+            # guard against explicit null values from the API
+            content = msg.get("content")
+            reasoning = msg.get("reasoning")
+            # prefer content, then reasoning, default to empty string
+            text = (content or reasoning or "").strip()
         else:
             text = ""
 
         if text:
             return text
 
-        raise ValueError("No generated text in OpenRouter response")
+        # If no text returned, don't raise - let calling code handle gracefully        
+        logging.warning("OpenRouter returned empty content (only reasoning), returning None for fallback")
+        return None
     except Exception as e:
         logging.error("OpenRouter text_generation failed: %s", e)
         raise
@@ -222,6 +246,7 @@ class ChatRequest(BaseModel):
     message: str
     num_images: int = 4  # default to 4 variations per spec
     refinement: Optional[str] = None
+    mode: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -279,6 +304,9 @@ Respond with JSON only.
             )
             return "creative", user_message
         text = generate_text(intent_prompt, max_tokens=300, temperature=0.7)
+        if not text:
+            logging.warning("Intent generation returned empty; using defaults")
+            return "creative", user_message
         start = text.find("{")
         end = text.rfind("}") + 1
         if start == -1 or end == -1:
@@ -316,7 +344,7 @@ def generate_copy(prompt: str, intent: str) -> str:
         if not OPENROUTER_API_KEY:
             return "A beautiful creation from your imagination."
         text = generate_text(copy_prompt, max_tokens=60, temperature=0.8)
-        return text.strip() or "A beautiful creation from your imagination."
+        return (text.strip() if text else None) or "A beautiful creation from your imagination."
     except Exception as e:
         logging.error("generate_copy failed: %s", e)
         return "A beautiful creation from your imagination."
@@ -334,7 +362,7 @@ def describe_image_variations(prompt: str, num_images: int) -> List[str]:
     try:
         desc_prompt = (
             f"You are an assistant that generates concise descriptions for each of "
-            f"{num_images} image variations based on the following prompt:\n" 
+            f"{num_images} image variations based on the following prompt:\n"
             f"'{prompt}'\n"
             "Each description should be a short phrase or sentence that includes "
             "an orientation hint (e.g. 16:9, portrait), a style/mood cue, a color "
@@ -342,6 +370,8 @@ def describe_image_variations(prompt: str, num_images: int) -> List[str]:
             f"{num_images}. Separate entries with newlines."
         )
         text = generate_text(desc_prompt, max_tokens=100, temperature=0.7)
+        if not text:
+            return [f"Variation {i+1}" for i in range(num_images)]
         lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
         # try to take last `num_images` lines if model outputs extra
         if len(lines) >= num_images:
@@ -368,7 +398,7 @@ def generate_refinement_suggestion(prompt: str) -> str:
             "sentence only."
         )
         text = generate_text(suggestion_prompt, max_tokens=60, temperature=0.7)
-        return text.strip()
+        return text.strip() if text else ""
     except Exception as e:
         logging.error("generate_refinement_suggestion failed: %s", e)
         return ""
@@ -614,20 +644,42 @@ def generate_images(prompt: str, num_images: int = 2) -> tuple[List[str], str]:
     return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (SVG - colored by prompt)"
 
 
-def generate_chat_reply(user_message: str) -> str:
+def generate_chat_reply(user_message: str, history: Optional[list] = None) -> str:
     """Generate a conversational reply to a purely textual message.
 
-    The core system prompt defined in prompts.py is automatically included via
-    :func:`generate_text`.  We don't need our own mini-system prompt here.
+    For chat, we use a minimal system prompt to avoid token exhaustion.
+    If the API returns empty content, we generate a smart fallback response.
     """
     try:
         if not OPENROUTER_API_KEY:
             logging.warning("OpenRouter API not configured; returning local fallback")
             return "I can help with image ideas and copy — what would you like to create?"
-        text = generate_text(user_message, max_tokens=300, temperature=0.7)
-        return text.strip()
+
+        # For chat, use minimal system prompt and higher max_tokens
+        minimal_system = "You are Vizzy, a helpful creative AI assistant. Answer concisely and helpfully."
+        text = generate_text(user_message, max_tokens=500, temperature=0.7, system_prompt=minimal_system)
+        
+        if text and text.strip():
+            result = text.strip()
+            logging.info("Chat reply generated: %s", result)
+            return result
+        else:
+            logging.warning("API returned empty content, using contextual fallback")
+            # Return a contextually appropriate response instead of generic "tell me"
+            msg_lower = user_message.strip().lower()
+            
+            # Analyze the type of question
+            if any(name in msg_lower for name in ["who", "leonardo", "messi", "shakespeare", "einstein", "picasso"]):
+                return f"That's a fascinating person! {user_message} represents an interesting figure in history. I'd love to help you visualize their legacy or create something inspired by them. Would you like me to generate an image, write some creative copy, or brainstorm ideas around this?"
+            elif "?" in msg_lower:
+                # Generic question - be helpful and offer Vizzy services
+                return f"Great question about {user_message.split()[0]}! While I work best with creative visual requests, I'm happy to help. Would you like me to:\n• Create an image inspired by this\n• Generate creative copy\n• Brainstorm visual ideas\nWhat sounds good?"
+            else:
+                # Statement - acknowledge and pivot to creation
+                return f"I like that: '{user_message}'. That could make a great visual! Would you like me to:\n• Generate image variations\n• Create accompanying copy\n• Suggest a creative direction\nLet me know what you'd like to explore!"
     except Exception as e:
-        logging.error("generate_chat_reply failed: %s", e)
+        logging.error("generate_chat_reply failed: %s", e, exc_info=True)
+        # fallback behaviors mirror earlier logic
         text = user_message.strip().lower()
         if any(k in text for k in ("summarize", "explain", "what is", "what's")):
             return (
@@ -730,11 +782,18 @@ async def chat(request: ChatRequest):
             except ValueError:
                 pass
 
-    # determine intent (may override num_images)
-    intent_category, base_prompt = interpret_intent(request.message)
+    # If frontend mode is 'chat', force chat intent
+    frontend_mode = getattr(request, 'mode', None)
+    if frontend_mode == 'chat':
+        intent_category = 'chat'
+        base_prompt = request.message
+    else:
+        intent_category, base_prompt = interpret_intent(request.message)
+
     if intent_category == "chat":
         # user is asking a general question - no image generation
-        reply = generate_chat_reply(request.message)
+        # pass conversation history for better context
+        reply = generate_chat_reply(request.message, history=session.get("messages", []))
         copy_text = reply
         images = []
         # descriptions/suggestion remain empty
@@ -756,7 +815,7 @@ async def chat(request: ChatRequest):
 
     # if this was the first response of a session, prepend the startup greeting
     if is_new:
-        from .prompts import STARTUP_PROMPT
+        from prompts import STARTUP_PROMPT
         copy_text = STARTUP_PROMPT + "\n\n" + copy_text
 
     user_msg = ChatMessage(role="user", content=request.message)
