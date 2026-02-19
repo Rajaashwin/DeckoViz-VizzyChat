@@ -77,26 +77,37 @@ function App() {
   }
 
   const handleUpload = async (file) => {
-    if (!file || !sessionId) return
-    setLoading(true)
+    if (!file || !sessionId) return;
+    setLoading(true);
     try {
-      const form = new FormData()
-      form.append('file', file)
+      const form = new FormData();
+      form.append('file', file);
+      // Create a local preview URL for the uploaded image
+      const imageUrl = URL.createObjectURL(file);
+      // Show the uploaded image in the chat
+      setMessages(prev => [
+        ...prev,
+        {
+          role: 'user',
+          content: 'Uploaded image',
+          images: [imageUrl],
+        }
+      ]);
       const response = await axios.post(`${API_BASE}/upload`, form, {
         headers: { 'Content-Type': 'multipart/form-data' }
-      })
-      const { analysis, transform_options } = response.data
+      });
+      const { analysis, transform_options } = response.data;
       const message = {
         role: 'assistant',
         content: `Image analysis: ${analysis}\nOptions: ${transform_options.join(', ')}`,
-        images: [],
-      }
-      setMessages(prev => [...prev, message])
+        images: [imageUrl],
+      };
+      setMessages(prev => [...prev, message]);
     } catch (err) {
-      console.error('Upload error:', err)
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Upload failed.', images: [] }])
+      console.error('Upload error:', err);
+      setMessages(prev => [...prev, { role: 'assistant', content: 'Upload failed.', images: [] }]);
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
   }
 
