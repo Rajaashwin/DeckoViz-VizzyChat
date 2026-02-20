@@ -52,6 +52,7 @@ HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")  # Free tier available
 REPLICATE_API_KEY = os.getenv("REPLICATE_API_KEY")
 RUNWARE_API_KEY = os.getenv("RUNWARE_API_KEY")  # Primary image generation provider
+AIML_API_KEY = os.getenv("AIML_API_KEY")  # Unified API for chat & image fallback
 
 # Debug file contents
 try:
@@ -94,8 +95,11 @@ if RUNWARE_API_KEY:
     logging.info(f"Runware key preview: {RUNWARE_API_KEY[:10]}...")
 logging.info(f"REPLICATE_API_KEY set: {bool(REPLICATE_API_KEY)}")
 logging.info(f"OPENROUTER_API_KEY set: {bool(OPENROUTER_API_KEY)}")
+logging.info(f"AIML_API_KEY set: {bool(AIML_API_KEY)}")
 if REPLICATE_API_KEY:
     logging.info(f"Replicate key preview: {REPLICATE_API_KEY[:10]}...")
+if AIML_API_KEY:
+    logging.info(f"AIML key preview: {AIML_API_KEY[:10]}...")
 
 # Initialize HF client (deprecated, kept for compatibility)
 hf_client = None
@@ -800,6 +804,128 @@ def generate_images_replicate(prompt: str, num_images: int = 3) -> tuple[List[st
         return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (Replicate error)"
 
 
+def generate_text_aiml(
+    prompt: Optional[str] = None,
+    max_tokens: int = 300,
+    temperature: float = 0.7,
+    messages: Optional[list] = None,
+) -> Optional[str]:
+    """
+    Generate text using AIML API (https://aimlapi.com).
+    Fallback provider for when OpenRouter fails.
+    Returns None if API key not set or request fails.
+    """
+    if not AIML_API_KEY:
+        logging.warning("AIML_API_KEY not set, skipping AIML text generation")
+        return None
+
+    try:
+        import requests
+
+        api_url = "https://api.aimlapi.com/v1/chat/completions"
+        
+        headers = {
+            "Authorization": f"Bearer {AIML_API_KEY}",
+            "Content-Type": "application/json",
+        }
+
+        # Build message list
+        if messages is not None:
+            msgs = messages.copy()
+        else:
+            msgs = []
+            if prompt is not None:
+                msgs.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": "gpt-3.5-turbo",  # AIML API default model
+            "messages": msgs,
+            "max_tokens": min(max_tokens, 1000),
+            "temperature": temperature,
+        }
+
+        logging.info(f"🔌 AIML API request: {len(msgs)} messages, max_tokens={payload['max_tokens']}")
+        
+        response = requests.post(api_url, json=payload, headers=headers, timeout=45)
+
+        if response.status_code != 200:
+            logging.error(f"AIML API error: {response.status_code} - {response.text[:200]}")
+            return None
+
+        logging.debug(f"AIML raw response: {response.text}")
+        try:
+            data = response.json()
+        except Exception as e:
+            logging.error(f"Failed to parse AIML JSON: {e}")
+            return None
+
+        # Extract content from AIML response
+        if "choices" in data and len(data["choices"]) > 0:
+            msg = data["choices"][0].get("message", {})
+            content = msg.get("content", "").strip()
+            if content:
+                logging.info(f"✅ Generated text via AIML API ({len(content)} chars)")
+                return content
+        
+        logging.warning("AIML returned empty content")
+        return None
+        
+    except Exception as e:
+        logging.error(f"AIML text generation failed: {e}")
+        return None
+
+
+def generate_images_aiml(prompt: str, num_images: int = 4) -> tuple[List[str], str]:
+    """
+    Generate images using AIML API (https://aimlapi.com).
+    Fallback provider for when primary image providers fail.
+    Returns tuple of (image_urls, model_name).
+    """
+    if not AIML_API_KEY:
+        logging.info("⚠️  AIML_API_KEY not set, skipping AIML image generation")
+        return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (AIML key not set)"
+
+    try:
+        import requests
+
+        api_url = "https://api.aimlapi.com/v1/images/generations"
+        
+        headers = {
+            "Authorization": f"Bearer {AIML_API_KEY}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {
+            "prompt": prompt,
+            "n": num_images,  # Number of images
+            "size": "1024x1024",
+        }
+
+        logging.info(f"🔌 AIML Image API request: {num_images} images for prompt: {prompt[:50]}...")
+        
+        response = requests.post(api_url, json=payload, headers=headers, timeout=60)
+
+        if response.status_code != 200:
+            logging.error(f"AIML Image API error: {response.status_code} - {response.text[:200]}")
+            return _generate_placeholder_images(num_images, seed_prompt=prompt), f"Placeholder (AIML {response.status_code})"
+
+        data = response.json()
+        logging.debug(f"AIML image response: {data}")
+
+        if "data" in data and len(data["data"]) > 0:
+            image_urls = [img.get("url") for img in data["data"] if img.get("url")]
+            if image_urls:
+                logging.info(f"✅ Successfully generated {len(image_urls)} images via AIML API")
+                return image_urls[:num_images], "AIML (Fallback Image Generation)"
+        
+        logging.warning("AIML returned no images")
+        return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (AIML no images)"
+        
+    except Exception as e:
+        logging.error(f"AIML image generation failed: {e}")
+        return _generate_placeholder_images(num_images, seed_prompt=prompt), f"Placeholder (AIML error: {str(e)[:30]})"
+
+
 def generate_images(prompt: str, num_images: int = 2) -> tuple[List[str], str]:
     """
     Intelligently generate images with fallback chain:
@@ -859,9 +985,20 @@ def generate_images(prompt: str, num_images: int = 2) -> tuple[List[str], str]:
                 logging.info(f"✓ Generated images via {model}")
                 return images, model
         except Exception as e:
-            logging.warning(f"OpenRouter failed ({e}), using SVG fallback...")
+            logging.warning(f"OpenRouter failed ({e}), trying AIML...")
     
-    # Priority 5: Fallback to colored SVG placeholders
+    # Priority 5: Try AIML API (unified API platform with image generation)
+    if AIML_API_KEY:
+        logging.info("Priority 5: Attempting AIML API...")
+        try:
+            images, model = generate_images_aiml(prompt, num_images)
+            if images and not "Placeholder" in model:
+                logging.info(f"✓ Generated images via {model}")
+                return images, model
+        except Exception as e:
+            logging.warning(f"AIML failed ({e}), using SVG fallback...")
+    
+    # Priority 6: Fallback to colored SVG placeholders
     logging.info("Using SVG placeholder images (all providers exhausted)")
     metrics["image_api_failures"] += 1  # Track that we had to use SVG fallback
     return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (SVG - colored by prompt)"
@@ -875,7 +1012,13 @@ def generate_chat_reply(user_message: str, history: Optional[list] = None) -> st
     """
     try:
         if not OPENROUTER_API_KEY:
-            logging.warning("OpenRouter API not configured; returning local fallback")
+            logging.warning("OpenRouter API not configured; attempting AIML fallback")
+            if AIML_API_KEY:
+                minimal_system = "You are Vizzy, a helpful creative AI assistant. Answer concisely and helpfully."
+                text = generate_text_aiml(user_message, max_tokens=500, temperature=0.7, messages=[{"role": "system", "content": minimal_system}, {"role": "user", "content": user_message}])
+                if text and text.strip():
+                    logging.info("Chat reply generated via AIML fallback")
+                    return text.strip()
             return "I can help with image ideas and copy — what would you like to create?"
 
         # For chat, use minimal system prompt and higher max_tokens
@@ -887,6 +1030,14 @@ def generate_chat_reply(user_message: str, history: Optional[list] = None) -> st
             logging.info("Chat reply generated: %s", result)
             return result
         else:
+            logging.warning("OpenRouter returned empty content, trying AIML fallback...")
+            # Try AIML API as fallback
+            if AIML_API_KEY:
+                text = generate_text_aiml(user_message, max_tokens=500, temperature=0.7, messages=[{"role": "system", "content": minimal_system}, {"role": "user", "content": user_message}])
+                if text and text.strip():
+                    logging.info("Chat reply generated via AIML fallback")
+                    return text.strip()
+            
             logging.warning("API returned empty content, using contextual fallback")
             # Return a contextually appropriate response instead of generic "tell me"
             msg_lower = user_message.strip().lower()
@@ -929,6 +1080,7 @@ async def startup():
     print("[*] Vizzy Chat Backend started")
     print(f"Runware API configured: {bool(RUNWARE_API_KEY)} (PRIMARY IMAGE PROVIDER)")
     print(f"OpenRouter API configured: {bool(OPENROUTER_API_KEY)}")
+    print(f"AIML API configured: {bool(AIML_API_KEY)} (CHAT & IMAGE FALLBACK)")
     print(f"Replicate key available: {bool(REPLICATE_API_KEY)}")
 
 
