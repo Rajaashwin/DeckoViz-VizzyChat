@@ -123,7 +123,7 @@ def generate_text(
         else:
             msgs = []
             # system message: select based on user_type or use override/default
-            from prompts import CORE_SYSTEM_PROMPT, ENTERPRISE_SYSTEM_PROMPT
+            from .prompts import CORE_SYSTEM_PROMPT, ENTERPRISE_SYSTEM_PROMPT
             if system_prompt is not None:
                 sys_msg = system_prompt
             elif user_type == "enterprise":
@@ -1229,7 +1229,7 @@ async def chat(request: ChatRequest):
 
     # if this was the first response of a session, prepend the startup greeting
     if is_new:
-        from prompts import STARTUP_PROMPT, ENTERPRISE_STARTUP_PROMPT
+        from .prompts import STARTUP_PROMPT, ENTERPRISE_STARTUP_PROMPT
         startup = ENTERPRISE_STARTUP_PROMPT if user_type == "enterprise" else STARTUP_PROMPT
         copy_text = startup + "\n\n" + copy_text
 
