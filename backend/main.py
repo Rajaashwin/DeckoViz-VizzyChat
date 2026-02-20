@@ -1,7 +1,6 @@
 """
 Vizzy Chat Backend - FastAPI
-Uses OpenRouter API for text generation (free tier via Mistral-7B).
-Images via Replicate (optional).
+Uses OpenRouter, Runware, AIML, and HuggingFace APIs for generation.
 """
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
@@ -21,13 +20,7 @@ from huggingface_hub import InferenceClient
 import shutil
 from pathlib import Path
 
-# Try to import replicate, it's optional
-try:
-    import replicate
-    HAS_REPLICATE = True
-except ImportError:
-    HAS_REPLICATE = False
-    replicate = None
+# Replicate removed - using Runware, HuggingFace, and OpenRouter instead
 
 # Configure logging for debugging
 logging.basicConfig(
@@ -62,37 +55,12 @@ try:
 except Exception as e:
     logging.error(f"Could not read .env file: {e}")
 
-# Some users/tools set the variable name to REPLICATE_API_TOKEN; accept both.
-if not REPLICATE_API_KEY:
-    REPLICATE_API_KEY = os.getenv("REPLICATE_API_TOKEN")
-
-# If still not found, attempt to parse the .env file directly as a last resort.
-if not REPLICATE_API_KEY and os.path.exists(env_path):
-    try:
-        with open(env_path, "r", encoding="utf-8") as f:
-            for line in f:
-                if not line or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                k = k.strip()
-                v = v.strip().strip('"').strip("'")
-                if k == "REPLICATE_API_KEY" and v:
-                    REPLICATE_API_KEY = v
-                    break
-                if k == "REPLICATE_API_TOKEN" and v:
-                    REPLICATE_API_KEY = v
-                    break
-    except Exception as e:
-        logging.warning(f"Failed to parse .env for replicate key: {e}")
-
-# Normalize empty-string vs None
-if REPLICATE_API_KEY == "" or REPLICATE_API_KEY is None:
-    REPLICATE_API_KEY = None
-
 # Debug: Log loaded API keys (don't print the full key)
 logging.info(f"RUNWARE_API_KEY set: {bool(RUNWARE_API_KEY)}")
 if RUNWARE_API_KEY:
     logging.info(f"Runware key preview: {RUNWARE_API_KEY[:10]}...")
+logging.info(f"AIML_API_KEY set: {bool(AIML_API_KEY)}")
+logging.info(f"OpenRouter API set: {bool(OPENROUTER_API_KEY)}")
 logging.info(f"REPLICATE_API_KEY set: {bool(REPLICATE_API_KEY)}")
 logging.info(f"OPENROUTER_API_KEY set: {bool(OPENROUTER_API_KEY)}")
 logging.info(f"AIML_API_KEY set: {bool(AIML_API_KEY)}")
@@ -778,54 +746,6 @@ def generate_images_runware(prompt: str, num_images: int = 4) -> tuple[List[str]
         logging.error(f"Traceback:\n{traceback.format_exc()}")
         return [], f"Placeholder (Runware error: {str(e)[:60]})"
 
-
-def generate_images_replicate(prompt: str, num_images: int = 3) -> tuple[List[str], str]:
-    """Generate images using Replicate Flux Schnell model if available, else return placeholders."""
-    if not REPLICATE_API_KEY or not HAS_REPLICATE:
-        return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (no Replicate key or module)"
-
-    try:
-        # Set Replicate API token
-        import os as os_module
-        os_module.environ["REPLICATE_API_TOKEN"] = REPLICATE_API_KEY
-        
-        logging.info(f"Calling Replicate Flux Schnell with token (first 10): {REPLICATE_API_KEY[:10]}...")
-        logging.info(f"Note: If 402 error occurs, Replicate account has insufficient credits. Add credits at https://replicate.com/account/billing")
-        
-        # Use Flux Schnell - a free, fast, open-source image generation model
-        output = replicate.run(
-            "black-forest-labs/flux-schnell",
-            input={
-                "prompt": prompt,
-                "go_fast": True,
-                "num_outputs": num_images,
-                "aspect_ratio": "1:1",
-                "output_format": "webp",
-                "output_quality": 80
-            }
-        )
-        logging.info(f"Replicate output type: {type(output)}, length: {len(output) if isinstance(output, list) else 'N/A'}")
-        
-        if output:
-            if isinstance(output, list) and len(output) > 0:
-                logging.info(f"Successfully generated {len(output)} images from Replicate Flux Schnell")
-                return output[:num_images], "Replicate (Flux Schnell)"
-            else:
-                logging.warning("Replicate returned unexpected output format")
-                return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (Replicate invalid output)"
-        else:
-            logging.warning("Replicate returned no images")
-            return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (Replicate no output)"
-            
-    except Exception as e:
-        error_msg = str(e)
-        if "402" in error_msg or "insufficient" in error_msg.lower() or "credit" in error_msg.lower():
-            logging.warning(f"Replicate 402 Error: Insufficient credits. Add credits at https://replicate.com/account/billing")
-        else:
-            logging.error(f"Replicate image generation failed: {e}")
-        return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (Replicate error)"
-
-
 def generate_text_aiml(
     prompt: Optional[str] = None,
     max_tokens: int = 300,
@@ -953,12 +873,12 @@ def generate_images(prompt: str, num_images: int = 2) -> tuple[List[str], str]:
     Intelligently generate images with fallback chain:
     1. Runware (primary - provided API key)
     2. HuggingFace (free, no credits needed)
-    3. Replicate (if API key available)
-    4. OpenRouter (if API key available)
+    3. OpenRouter (if API key available)
+    4. AIML API (unified fallback)
     5. SVG placeholders (final fallback)
     Returns tuple of (image_urls, model_name).
     """
-    logging.info(f"generate_images() called: RW={'yes' if RUNWARE_API_KEY else 'no'}, HF={'yes' if hf_client else 'no'}, REP={HAS_REPLICATE}, OR={'yes' if OPENROUTER_API_KEY else 'no'}")
+    logging.info(f"generate_images() called: RW={'yes' if RUNWARE_API_KEY else 'no'}, HF={'yes' if hf_client else 'no'}, OR={'yes' if OPENROUTER_API_KEY else 'no'}, AIML={'yes' if AIML_API_KEY else 'no'}")
     
     # Priority 1: Try Runware (PRIMARY PROVIDER)
     if RUNWARE_API_KEY:
@@ -983,24 +903,11 @@ def generate_images(prompt: str, num_images: int = 2) -> tuple[List[str], str]:
         else:
             logging.info(f"HuggingFace returned: {model}")
     except Exception as e:
-        logging.warning(f"HuggingFace failed ({e}), trying Replicate...")
+        logging.warning(f"HuggingFace failed ({e}), trying OpenRouter...")
     
-    # Priority 3: Try Replicate if API key available (for when user adds credits)
-    if REPLICATE_API_KEY and HAS_REPLICATE:
-        logging.info("Priority 3: Attempting Replicate...")
-        try:
-            images, model = generate_images_replicate(prompt, num_images)
-            if images and not "Placeholder" in model:
-                logging.info(f"✓ Generated images via {model}")
-                return images, model
-            else:
-                logging.info(f"Replicate returned: {model}")
-        except Exception as e:
-            logging.warning(f"Replicate failed ({e}), trying OpenRouter...")
-    
-    # Priority 4: Try OpenRouter (if endpoint available)
+    # Priority 3: Try OpenRouter (if endpoint available)
     if OPENROUTER_API_KEY:
-        logging.info("Priority 4: Attempting OpenRouter...")
+        logging.info("Priority 3: Attempting OpenRouter...")
         try:
             images, model = generate_images_openrouter(prompt, num_images)
             if images and not "Placeholder" in model:
@@ -1009,9 +916,9 @@ def generate_images(prompt: str, num_images: int = 2) -> tuple[List[str], str]:
         except Exception as e:
             logging.warning(f"OpenRouter failed ({e}), trying AIML...")
     
-    # Priority 5: Try AIML API (unified API platform with image generation)
+    # Priority 4: Try AIML API (unified API platform with image generation)
     if AIML_API_KEY:
-        logging.info("Priority 5: Attempting AIML API...")
+        logging.info("Priority 4: Attempting AIML API...")
         try:
             images, model = generate_images_aiml(prompt, num_images)
             if images and not "Placeholder" in model:
@@ -1020,7 +927,7 @@ def generate_images(prompt: str, num_images: int = 2) -> tuple[List[str], str]:
         except Exception as e:
             logging.warning(f"AIML failed ({e}), using SVG fallback...")
     
-    # Priority 6: Fallback to colored SVG placeholders
+    # Priority 5: Fallback to colored SVG placeholders
     logging.info("Using SVG placeholder images (all providers exhausted)")
     metrics["image_api_failures"] += 1  # Track that we had to use SVG fallback
     return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (SVG - colored by prompt)"
