@@ -29,8 +29,15 @@ except ImportError:
     HAS_REPLICATE = False
     replicate = None
 
-# Configure logging FIRST
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging for debugging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("debug.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
 
 # Load environment variables from explicit path
 env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -593,71 +600,29 @@ def generate_images_huggingface(prompt: str, num_images: int = 4) -> tuple[List[
 
 def generate_images_openrouter(prompt: str, num_images: int = 2) -> tuple[List[str], str]:
     """
-    Generate images using OpenRouter's Flux AI image generation API.
-    Flux is free on OpenRouter and produces high-quality images.
-    Falls back to colored SVG placeholders if API unavailable.
+    OpenRouter does NOT support image generation via REST API.
+    They only support chat completions. This function returns placeholders.
+    For image generation, use Runware, Replicate, or HuggingFace instead.
+    
     Returns tuple of (image_urls, model_used).
     """
-    if not OPENROUTER_API_KEY:
-        logging.warning("OPENROUTER_API_KEY not set for image generation, using placeholders")
-        return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (no API key)"
+    logging.info("OpenRouter does not support image generation API, using fallback")
+    return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (OpenRouter no image API)"
+
+
+def validate_runware_api_key() -> bool:
+    """Validate Runware API key format and presence."""
+    if not RUNWARE_API_KEY:
+        logging.error("RUNWARE_API_KEY not set in .env")
+        return False
     
-    try:
-        import requests
-        import time
-        
-        # OpenRouter image generation endpoint - Flux AI is free
-        api_url = "https://openrouter.ai/api/v1/images/generations"
-        
-        logging.info(f"Generating {num_images} images via OpenRouter Flux for: {prompt[:50]}...")
-        
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "model": "black-forest-labs/flux-pro",  # Flux AI - free, high quality
-            "prompt": prompt,
-            "num_images": min(num_images, 2),  # OpenRouter currently supports max 2
-            "size": "512x512",
-            "response_format": "url"  # Return URLs instead of base64
-        }
-        
-        # Make request with timeout and retry on timeout
-        max_retries = 2
-        response = None
-        
-        for attempt in range(max_retries):
-            try:
-                response = requests.post(api_url, json=payload, headers=headers, timeout=45)
-                break
-            except requests.Timeout:
-                if attempt < max_retries - 1:
-                    logging.warning(f"Timeout occurred, retrying ({attempt + 1}/{max_retries})...")
-                    time.sleep(2)  # Wait before retrying
-                else:
-                    logging.error("Max retries reached, using placeholders")
-                    return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (timeout)"
-
-        if response and response.status_code == 200:
-            try:
-                data = response.json()
-                image_urls = data.get("images", [])
-                if len(image_urls) < num_images:
-                    logging.warning("Fewer images returned than requested, using placeholders")
-                    return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (partial response)"
-                return image_urls, "OpenRouter Flux"
-            except json.JSONDecodeError:
-                logging.error("Invalid JSON response, using placeholders")
-                return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (invalid JSON)"
-        else:
-            logging.error(f"OpenRouter API error: {response.status_code if response else 'No response'}")
-            return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (API error)"
-    except Exception as e:
-        logging.error("OpenRouter image_generation failed: %s", e)
-        raise
-
+    if len(RUNWARE_API_KEY) < 20:
+        logging.error(f"RUNWARE_API_KEY appears invalid (too short): {RUNWARE_API_KEY[:10]}...")
+        return False
+    
+    logging.info(f"RUNWARE_API_KEY validation: OK (length={len(RUNWARE_API_KEY)})")
+    logging.info(f"RUNWARE_API_KEY format check: Bearer token prefix will be added in headers")
+    return True
 
 def generate_images_runware(prompt: str, num_images: int = 4) -> tuple[List[str], str]:
     """Generate images using Runware API - Per official API docs.
@@ -667,9 +632,9 @@ def generate_images_runware(prompt: str, num_images: int = 4) -> tuple[List[str]
     
     Returns tuple of (image_urls, model_used).
     """
-    if not RUNWARE_API_KEY:
-        logging.warning("❌ RUNWARE_API_KEY not set, skipping Runware")
-        return [], "Placeholder (no Runware key)"
+    if not validate_runware_api_key():
+        logging.warning("RUNWARE_API_KEY validation failed, skipping Runware")
+        return [], "Placeholder (invalid Runware key)"
     
     try:
         import requests
@@ -754,7 +719,8 @@ def generate_images_runware(prompt: str, num_images: int = 4) -> tuple[List[str]
                 
                 elif response.status_code == 401:
                     logging.error(f"   ❌ Unauthorized (401): Invalid API key or key expired")
-                    logging.error(f"   Key used: {RUNWARE_API_KEY[:20]}...")
+                    logging.error(f"   Key used: {RUNWARE_API_KEY[:15]}...")
+                    logging.error(f"   Response: {response.text[:200]}")
                     return [], "Placeholder (Runware auth failed)"
                 elif response.status_code == 429:
                     logging.error(f"   ❌ Rate limited (429): Too many requests")
@@ -798,6 +764,7 @@ def generate_images_replicate(prompt: str, num_images: int = 3) -> tuple[List[st
         os_module.environ["REPLICATE_API_TOKEN"] = REPLICATE_API_KEY
         
         logging.info(f"Calling Replicate Flux Schnell with token (first 10): {REPLICATE_API_KEY[:10]}...")
+        logging.info(f"Note: If 402 error occurs, Replicate account has insufficient credits. Add credits at https://replicate.com/account/billing")
         
         # Use Flux Schnell - a free, fast, open-source image generation model
         output = replicate.run(
@@ -825,7 +792,11 @@ def generate_images_replicate(prompt: str, num_images: int = 3) -> tuple[List[st
             return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (Replicate no output)"
             
     except Exception as e:
-        logging.error(f"Replicate image generation failed: {e}")
+        error_msg = str(e)
+        if "402" in error_msg or "insufficient" in error_msg.lower() or "credit" in error_msg.lower():
+            logging.warning(f"Replicate 402 Error: Insufficient credits. Add credits at https://replicate.com/account/billing")
+        else:
+            logging.error(f"Replicate image generation failed: {e}")
         return _generate_placeholder_images(num_images, seed_prompt=prompt), "Placeholder (Replicate error)"
 
 
@@ -1077,7 +1048,7 @@ async def chat(request: ChatRequest):
         sessions[session_id] = {
             "created_at": datetime.now().isoformat(),
             "messages": [],
-            "taste": UserTaste(),
+            "taste": UserTaste().model_dump(),  # Convert Pydantic model to dict for JSON serialization
             # track how many images this session has created (for daily limits)
             "image_count": 0,
             "quota_reset_date": date.today().isoformat(),
@@ -1198,8 +1169,15 @@ async def chat(request: ChatRequest):
     session["messages"].append(user_msg.model_dump())
     session["messages"].append(assistant_msg.model_dump())
 
-    if intent_category and intent_category not in session["taste"].themes:
-        session["taste"].themes.append(intent_category)
+    # Handle taste as dict (it was converted from UserTaste model)
+    if isinstance(session["taste"], dict):
+        taste_themes = session["taste"].get("themes", [])
+        if intent_category and intent_category not in taste_themes:
+            session["taste"]["themes"] = taste_themes + [intent_category]
+    else:
+        # Fallback for object format
+        if intent_category and intent_category not in session["taste"].themes:
+            session["taste"].themes.append(intent_category)
 
     # compute quota info
     daily_count = session.get("image_count", 0)
