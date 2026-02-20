@@ -171,7 +171,7 @@ def generate_text(
         payload = {
             "model": "openrouter/auto",  # Auto-selects best available free model
             "messages": msgs,
-            "max_tokens": min(max_tokens, 1000),
+            "max_tokens": min(max_tokens, 2000),  # Increased to prevent token limit cutoff on reasoning models
             "temperature": temperature,
         }
 
@@ -214,8 +214,27 @@ def generate_text(
             # guard against explicit null values from the API
             content = msg.get("content")
             reasoning = msg.get("reasoning")
-            # prefer content, then reasoning, default to empty string
-            text = (content or reasoning or "").strip()
+            
+            # Use content if available
+            if content and content.strip():
+                text = content.strip()
+            # If content is empty but we have reasoning, clean it up and use it
+            elif reasoning and reasoning.strip():
+                # Remove markdown thinking markers and clean up reasoning text
+                cleaned_reasoning = reasoning.strip()
+                # Remove "**...**" markdown headers
+                import re
+                cleaned_reasoning = re.sub(r'\*\*.*?\*\*\s*', '', cleaned_reasoning)
+                # Remove leading numbers and dashes
+                lines = [line.strip() for line in cleaned_reasoning.split('\n') if line.strip()]
+                # Take the last few meaningful lines as the response
+                meaningful_lines = [l for l in lines if len(l) > 10 and not l.startswith(('*', '#', '-'))]
+                if meaningful_lines:
+                    text = ' '.join(meaningful_lines[-2:]) if len(meaningful_lines) >= 2 else meaningful_lines[-1]
+                else:
+                    text = ""
+            else:
+                text = ""
         else:
             text = ""
 
@@ -223,7 +242,7 @@ def generate_text(
             return text
 
         # If no text returned, don't raise - let calling code handle gracefully        
-        logging.warning("OpenRouter returned empty content (only reasoning), returning None for fallback")
+        logging.warning("OpenRouter returned empty content and reasoning, returning None for fallback")
         return None
     except Exception as e:
         logging.error("OpenRouter text_generation failed: %s", e)
@@ -1015,15 +1034,15 @@ def generate_chat_reply(user_message: str, history: Optional[list] = None) -> st
             logging.warning("OpenRouter API not configured; attempting AIML fallback")
             if AIML_API_KEY:
                 minimal_system = "You are Vizzy, a helpful creative AI assistant. Answer concisely and helpfully."
-                text = generate_text_aiml(user_message, max_tokens=500, temperature=0.7, messages=[{"role": "system", "content": minimal_system}, {"role": "user", "content": user_message}])
+                text = generate_text_aiml(user_message, max_tokens=800, temperature=0.7, messages=[{"role": "system", "content": minimal_system}, {"role": "user", "content": user_message}])
                 if text and text.strip():
                     logging.info("Chat reply generated via AIML fallback")
                     return text.strip()
             return "I can help with image ideas and copy — what would you like to create?"
 
-        # For chat, use minimal system prompt and higher max_tokens
+        # For chat, use minimal system prompt and higher max_tokens to prevent token limit cutoff
         minimal_system = "You are Vizzy, a helpful creative AI assistant. Answer concisely and helpfully."
-        text = generate_text(user_message, max_tokens=500, temperature=0.7, system_prompt=minimal_system)
+        text = generate_text(user_message, max_tokens=800, temperature=0.7, system_prompt=minimal_system)
         
         if text and text.strip():
             result = text.strip()
@@ -1033,7 +1052,7 @@ def generate_chat_reply(user_message: str, history: Optional[list] = None) -> st
             logging.warning("OpenRouter returned empty content, trying AIML fallback...")
             # Try AIML API as fallback
             if AIML_API_KEY:
-                text = generate_text_aiml(user_message, max_tokens=500, temperature=0.7, messages=[{"role": "system", "content": minimal_system}, {"role": "user", "content": user_message}])
+                text = generate_text_aiml(user_message, max_tokens=800, temperature=0.7, messages=[{"role": "system", "content": minimal_system}, {"role": "user", "content": user_message}])
                 if text and text.strip():
                     logging.info("Chat reply generated via AIML fallback")
                     return text.strip()
